@@ -207,7 +207,11 @@ async function handler(ctx) {
         },
     });
 
-    const list = blockData.data[renderData.param.data2.reqParam.tplCompKey].list.map((item) => ({
+    const rawList = blockData.data?.[renderData.param.data2.reqParam.tplCompKey]?.list;
+    if (!rawList) {
+        return legacyIdHandler(ctx, globalConst.mkeyConst_mkey, globalConst.title);
+    }
+    const list = rawList.map((item) => ({
         title: item.title,
         description: item.brief,
         link: `https://www.sohu.com/a/${item.id}_${globalConst.mkeyConst_mkey}`,
@@ -224,8 +228,8 @@ async function handler(ctx) {
     };
 }
 
-async function legacyIdHandler(ctx) {
-    const id = ctx.req.param('xpt');
+async function legacyIdHandler(ctx, numericId?, authorTitle?) {
+    const id = numericId || ctx.req.param('xpt');
     const authorArticleAPI = `https://v2.sohu.com/author-page-api/author-articles/pc/${id}`;
 
     const response = await ofetch(authorArticleAPI);
@@ -238,7 +242,7 @@ async function legacyIdHandler(ctx) {
     const items = await Promise.all(list.map((e) => fetchArticle(e)));
 
     return {
-        title: `搜狐号 - ${id}`,
+        title: `搜狐号 - ${authorTitle || id}`,
         item: items,
     };
 }
