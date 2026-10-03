@@ -4,6 +4,7 @@ import { chromium } from 'playwright';
 import { config } from '@/config';
 
 import logger from './logger';
+import type { PlaywrightService } from './playwright-remote.worker';
 import proxy from './proxy';
 
 type GotoOptions = Parameters<Page['goto']>[1];
@@ -23,7 +24,7 @@ const getProxyOptions = (currentProxy: ProxyState | null | undefined) => {
     const username = currentProxy.urlHandler?.username;
     const password = currentProxy.urlHandler?.password;
     if (username || password) {
-        if (currentProxy.urlHandler.protocol !== 'http:') {
+        if (currentProxy.urlHandler!.protocol !== 'http:') {
             logger.warn('SOCKS/HTTPS proxy with authentication is not supported by playwright, continue without proxy');
             return {};
         }
@@ -31,7 +32,7 @@ const getProxyOptions = (currentProxy: ProxyState | null | undefined) => {
         return {
             proxy: {
                 password: decodeURIComponent(password ?? ''),
-                server: proxyServerFromUrl(currentProxy.urlHandler),
+                server: proxyServerFromUrl(currentProxy.urlHandler!),
                 username: decodeURIComponent(username ?? ''),
             },
         } satisfies Pick<LaunchOptions, 'proxy'>;
@@ -44,9 +45,9 @@ const getProxyOptions = (currentProxy: ProxyState | null | undefined) => {
     } satisfies Pick<LaunchOptions, 'proxy'>;
 };
 
+// Patchright already patches playwright's default args (e.g. injects --disable-blink-features=AutomationControlled and strips --enable-automation)
 const COMMON_LAUNCH_ARGS = ['--no-sandbox', '--disable-setuid-sandbox', '--window-position=0,0', '--ignore-certificate-errors', '--ignore-certificate-errors-spki-list'];
 
-// Patchright already patches playwright's default args (e.g. injects --disable-blink-features=AutomationControlled and strips --enable-automation), so we don't add those manually.
 const getLaunchOptions = (currentProxy?: ProxyState | null): LaunchOptions => ({
     args: COMMON_LAUNCH_ARGS,
     executablePath: config.chromiumExecutablePath || undefined,
@@ -54,75 +55,86 @@ const getLaunchOptions = (currentProxy?: ProxyState | null): LaunchOptions => ({
     ...getProxyOptions(currentProxy),
 });
 
-// Browserless accepts launch options as a `launch` URL query parameter (URL-encoded JSON).
-// (Patchright's own launch-server uses `launch-options` — RSSHub's WS_ENDPOINT targets browserless, so we emit `launch`.)
-// The browserless schema also differs from patchright's LaunchOptions: no `executablePath`, and `ignoreHTTPSErrors` is renamed to `acceptInsecureCerts`.
-type BrowserlessLaunchOptions = {
-    acceptInsecureCerts?: boolean;
-    args?: string[];
-    headless?: boolean;
-    ignoreDefaultArgs?: boolean | string[];
-    proxy?: LaunchOptions['proxy'];
-    slowMo?: number;
-    stealth?: boolean;
-};
+type BrowserlessLaunchOptions = Pick<LaunchOptions, 'args' | 'headless' | 'proxy'>;
+type BrowserlessCdpLaunchOptions = Omit<BrowserlessLaunchOptions, 'proxy'> & { stealth?: boolean };
 
 const toBrowserlessLaunchOptions = (currentProxy?: ProxyState | null): BrowserlessLaunchOptions => ({
-    acceptInsecureCerts: true,
     args: COMMON_LAUNCH_ARGS,
     headless: true,
-    stealth: true,
     ...getProxyOptions(currentProxy),
 });
 
-const getContextOptions = (): BrowserContextOptions => ({
+// CDP accepts `stealth` but NOT a `proxy` object.
+const toBrowserlessCDPLaunchOptions = (currentProxy?: ProxyState | null): BrowserlessCdpLaunchOptions => {
+    let proxyServerArgs: string[] = [];
+
+    if (currentProxy) {
+        if (currentProxy.urlHandler?.username || currentProxy.urlHandler?.password) {
+            logger.warn('Proxy authentication is not supported over CDP (--proxy-server), continue without proxy');
+        } else {
+            const server = currentProxy.uri.replace('socks5h://', 'socks5://').replace('socks4a://', 'socks4://').replace(/\/$/, '');
+            proxyServerArgs = [`--proxy-server=${server}`];
+        }
+    }
+
+    return {
+        args: [...COMMON_LAUNCH_ARGS, ...proxyServerArgs],
+        headless: true,
+        stealth: true,
+    };
+};
+
+const getContextOptions = (javaScriptEnabled?: boolean): BrowserContextOptions => ({
+    ...(javaScriptEnabled !== undefined && { javaScriptEnabled }),
     ignoreHTTPSErrors: true,
     userAgent: config.ua,
 });
 
-const launchBrowser = async (currentProxy?: ProxyState | null) => {
-    const browser = config.playwrightWSEndpoint ? await chromium.connect(getBrowserlessEndpoint(config.playwrightWSEndpoint, toBrowserlessLaunchOptions(currentProxy))) : await chromium.launch(getLaunchOptions(currentProxy));
-    const context = await browser.newContext(getContextOptions());
-    return { browser, context };
+// CDP > WS > local
+const launchBrowser = async (currentProxy?: ProxyState | null, javaScriptEnabled?: boolean) => {
+    let browser: Browser;
+    if (config.playwrightCDPEndpoint) {
+        browser = await chromium.connectOverCDP(getBrowserlessEndpoint(config.playwrightCDPEndpoint, toBrowserlessCDPLaunchOptions(currentProxy)));
+    } else if (config.playwrightWSEndpoint) {
+        browser = await chromium.connect(getBrowserlessEndpoint(config.playwrightWSEndpoint, toBrowserlessLaunchOptions(currentProxy)));
+    } else {
+        browser = await chromium.launch(getLaunchOptions(currentProxy));
+    }
+    try {
+        const context = await browser.newContext(getContextOptions(javaScriptEnabled));
+        return { browser, context };
+    } catch (error) {
+        await browser.close();
+        throw error;
+    }
 };
 
-// Merge our launch options into the existing `launch` query parameter so endpoint-level options
-// (e.g. `?launch=%7B%22stealth%22%3Atrue%7D`) are preserved instead of being overwritten.
 const getBrowserlessEndpoint = (endpoint: string, launchOptions: BrowserlessLaunchOptions) => {
     const endpointURL = new URL(endpoint);
-    const existing = endpointURL.searchParams.get('launch');
-    let merged: BrowserlessLaunchOptions = launchOptions;
-    if (existing) {
-        try {
-            merged = { ...(JSON.parse(existing) as BrowserlessLaunchOptions), ...launchOptions };
-        } catch {
-            // Existing value is not JSON (could be base64 or malformed); leave caller's options as the source of truth.
-        }
-    }
-    endpointURL.searchParams.set('launch', JSON.stringify(merged));
-    return endpointURL.toString();
+    endpointURL.searchParams.set('launch', JSON.stringify(launchOptions));
+    return endpointURL.href;
 };
 
-const scheduleClose = (browser: Browser, timeout = 30000) => {
-    setTimeout(() => {
-        void browser.close();
-    }, timeout);
-};
+const scheduleClose = (browser: Browser, timeout = 30000) =>
+    timeout === 0
+        ? undefined
+        : setTimeout(() => {
+              void browser.close();
+          }, timeout);
 
 /**
  * @returns Playwright browser context (native `newPage()` shares state across calls)
  */
-const outPlaywright = async () => {
+export default async function outPlaywright() {
     const currentProxy = proxy.getCurrentProxy();
     const { browser, context } = await launchBrowser(currentProxy && proxy.proxyObj.url_regex === '.*' ? currentProxy : null);
     scheduleClose(browser);
     return context;
-};
-
-export default outPlaywright;
+}
 
 // No-op in Node.js environment (used by Worker build via alias)
 export const setBrowserBinding = (_binding: any) => {};
+export const setPlaywrightServiceBinding = (_binding?: PlaywrightService, _origin?: string) => {};
 
 /**
  * @returns Playwright page
@@ -130,12 +142,18 @@ export const setBrowserBinding = (_binding: any) => {};
 export const getPlaywrightPage = async (
     url: string,
     instanceOptions: {
+        // Set to zero only when the caller always awaits destroy() in finally.
         closeTimeout?: number;
         gotoConfig?: GotoOptions;
         noGoto?: boolean;
+        javaScriptEnabled?: boolean;
+        useConfiguredEndpoint?: boolean;
         onBeforeLoad?: (page: Page, context?: BrowserContext) => Promise<void> | void;
     } = {}
 ) => {
+    if (instanceOptions.useConfiguredEndpoint && !config.playwrightWSEndpoint) {
+        throw new Error('Configure PLAYWRIGHT_WS_ENDPOINT to use the remote Playwright browser.');
+    }
     let allowProxy = false;
     const proxyRegex = new RegExp(proxy.proxyObj.url_regex);
     let urlHandler: URL | undefined;
@@ -152,38 +170,45 @@ export const getPlaywrightPage = async (
     const currentProxy = proxy.getCurrentProxy();
     const currentProxyState = currentProxy && allowProxy ? currentProxy : null;
     const hasProxy = Boolean(getProxyOptions(currentProxyState).proxy);
-    const { browser, context } = await launchBrowser(currentProxyState);
-    scheduleClose(browser, instanceOptions.closeTimeout);
-    const page = await context.newPage();
+    const { browser, context } = await launchBrowser(currentProxyState, instanceOptions.javaScriptEnabled);
+    const closeTimer = scheduleClose(browser, instanceOptions.closeTimeout);
+    const destroy = async () => {
+        clearTimeout(closeTimer);
+        await browser.close();
+    };
 
-    if (hasProxy && currentProxyState) {
-        logger.debug(`Proxying request in playwright via ${currentProxyState.uri}: ${url}`);
-    }
+    try {
+        const page = await context.newPage();
 
-    if (instanceOptions.onBeforeLoad) {
-        await instanceOptions.onBeforeLoad(page, context);
-    }
+        if (hasProxy && currentProxyState) {
+            logger.debug(`Proxying request in playwright via ${currentProxyState.uri}: ${url}`);
+        }
 
-    if (!instanceOptions.noGoto) {
-        try {
-            await page.goto(url, instanceOptions.gotoConfig || { waitUntil: 'domcontentloaded' });
-        } catch (error) {
-            if (hasProxy && currentProxyState && proxy.multiProxy) {
-                logger.warn(`Playwright navigation failed with proxy ${currentProxyState.uri}, marking as failed: ${error}`);
-                proxy.markProxyFailed(currentProxyState.uri);
+        if (instanceOptions.onBeforeLoad) {
+            await instanceOptions.onBeforeLoad(page, context);
+        }
+
+        if (!instanceOptions.noGoto) {
+            try {
+                await page.goto(url, instanceOptions.gotoConfig || { waitUntil: 'domcontentloaded' });
+            } catch (error) {
+                if (hasProxy && currentProxyState && proxy.multiProxy) {
+                    logger.warn(`Playwright navigation failed with proxy ${currentProxyState.uri}, marking as failed: ${error}`);
+                    proxy.markProxyFailed(currentProxyState.uri);
+                }
                 throw error;
             }
-            throw error;
         }
-    }
 
-    return {
-        context,
-        destroy: async () => {
-            await context.close();
-        },
-        page,
-    };
+        return {
+            context,
+            destroy,
+            page,
+        };
+    } catch (error) {
+        await destroy();
+        throw error;
+    }
 };
 
 export { type Page } from 'playwright';

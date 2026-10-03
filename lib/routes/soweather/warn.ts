@@ -72,7 +72,7 @@ function parseWarnings(script: string, variableName: string): RawWarning[] {
     const pattern = new RegExp(`var\\s+${variableName}\\s*=\\s*(\\[[\\s\\S]*?\\])\\s*(?=var\\s+\\w+\\s*=|$)`);
     const json = pattern.exec(script)?.[1];
 
-    return json ? (JSON.parse(json) as RawWarning[]) : [];
+    return json ? JSON.parse(json) : [];
 }
 
 function isRealWarning(warning: RawWarning): boolean {
@@ -93,10 +93,7 @@ function buildItem(warning: RawWarning, groupName: string): DataItem {
         description: content,
         content: {
             html: content,
-            text: content
-                .replaceAll(/<br\s*\/?>/gi, '\n')
-                .replaceAll(/<[^>]+>/g, '')
-                .trim(),
+            text: sanitizeHtml(content.replaceAll(/<br\s*\/?>/gi, '\n'), { allowedTags: [], allowedAttributes: {} }).trim(),
         },
         pubDate: timezone(parseDate(warning.fbsj, 'YYYY-MM-DD HH:mm'), 8),
         updated,
@@ -127,7 +124,7 @@ function buildContent(warning: RawWarning): string {
 
 function getWarningInfo(htmlword: string): string {
     return htmlword
-        .split('防御指引')[0]
+        .split('防御指引', 1)[0]
         .replaceAll(/(?:(?:\s|&nbsp;)*<br\s*\/?>)+\s*$/gi, '')
         .trim();
 }

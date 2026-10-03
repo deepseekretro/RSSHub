@@ -1,4 +1,5 @@
 import { load } from 'cheerio';
+import { FetchError } from 'ofetch';
 
 import cache from '@/utils/cache';
 import got from '@/utils/got';
@@ -32,7 +33,7 @@ const parseItems = (list) =>
                     });
                     data = response.data;
                 } catch (error) {
-                    if ((error.name === 'HTTPError' || error.name === 'FetchError') && error.response.statusCode === 404) {
+                    if (error instanceof FetchError && error.statusCode === 404) {
                         logger.error(`Error parsing article ${item.link}: ${error.message}`);
                         return item;
                     }

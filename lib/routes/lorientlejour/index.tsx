@@ -4,7 +4,7 @@ import { renderToString } from 'hono/jsx/dom/server';
 import { FetchError } from 'ofetch';
 
 import { config } from '@/config';
-import type { Route } from '@/types';
+import type { Language, Route } from '@/types';
 import cache from '@/utils/cache';
 import got from '@/utils/got';
 import { parseDate } from '@/utils/parse-date';
@@ -143,14 +143,14 @@ async function handler(ctx) {
 
     let url = `https://www.lorientlejour.com/cmsapi/content.php?text=clean&key=${key}&action=search&category=${encodeURIComponent(JSON.stringify(categoriesParam))}&limit=${limit}&text=false&page=1`;
     if (token) {
-        url = url + `&token=${token}`;
+        url += `&token=${token}`;
     }
     const response = await got(url);
     const items = response.data.data.map((item) => {
         item.link = item.url;
         item.author = item.authors.map((author) => author.name).join(', ');
-        item.pubDate = timezone(parseDate(item.firstPublished), +3);
-        item.updated = timezone(parseDate(item.lastUpdate), +3);
+        item.pubDate = timezone(parseDate(item.firstPublished), 3);
+        item.updated = timezone(parseDate(item.lastUpdate), 3);
         item.category = item.categories.map((itemCategory) => itemCategory.name);
         const contents = item.contents;
         const $ = load(contents);
@@ -161,10 +161,12 @@ async function handler(ctx) {
             article.find('.inlineImage').each((_, el) => {
                 const inlineImageSrc = $(el).attr('src');
                 const inlineAttachment = item.inline_attachments.find((inlineAttachment) => inlineAttachment.url === inlineImageSrc);
-                if (inlineAttachment && inlineAttachment.description) {
-                    $(el).wrap('<figure></figure>');
-                    $(el).after(`<figcaption>${inlineAttachment.description}</figcaption>`);
+                if (!(inlineAttachment && inlineAttachment.description)) {
+                    return;
                 }
+
+                $(el).wrap('<figure></figure>');
+                $(el).after(`<figcaption>${inlineAttachment.description}</figcaption>`);
             });
         }
         item.description = renderToString(
@@ -189,7 +191,7 @@ async function handler(ctx) {
     return {
         title,
         description,
-        language,
+        language: language as Language,
         link,
         item: items,
     };

@@ -67,15 +67,20 @@ async function handler(ctx) {
             const coverLink = $item.find('.cover_link').attr('href');
             const image = $item.find('.cover .cover_link img');
             const alt = image.attr('alt') || '';
+            const downloadUrl = new URL($item.find('.downbtn').attr('href')!, baseUrl);
+            downloadUrl.searchParams.delete('dl');
+            const fullImage = new URL(image.attr('data-src')!);
+            fullImage.searchParams.set('o', Buffer.from(downloadUrl.href).toString('base64'));
             const sum = $item.find('.sum');
-            const title = sum.text().split('\n')[0] || alt;
+            const title = sum.text().split('\n', 1)[0] || alt;
             const content = sum.html()?.replaceAll('\n', '<br>') || alt;
+            const isVideo = $item.find('.corner .icon_video, .corner .icon_tv').length;
 
             return {
                 title,
-                description: `<img src="${image.attr('data-src')}"><br>${content}`,
+                description: `<img src="${isVideo ? image.attr('data-src') : fullImage.href}"><br>${content}`,
                 link: `${baseUrl}${coverLink}`,
-                guid: coverLink?.split('/')?.[2],
+                guid: coverLink?.split('/', 3)?.[2],
                 pubDate: parseRelativeDate($item.find('.time .txt').text()),
                 slideOrVideo: $item.find('.corner').length,
             };
@@ -84,8 +89,6 @@ async function handler(ctx) {
     const items = await Promise.all(
         list.map((item) =>
             cache.tryGet(item.link, async () => {
-                let media = '';
-
                 if (item.slideOrVideo) {
                     const page = await context.newPage();
                     await page.route('**/*', (route) => {
@@ -100,22 +103,21 @@ async function handler(ctx) {
                     const html = await page.content();
                     const $ = load(html);
 
-                    media = $('.slide-item').length
+                    const media = $('.slide-item').length
                         ? $('.slide-item div:first-of-type')
                               .toArray()
                               .map((item) => {
                                   const $item = $(item);
                                   if ($item.hasClass('video')) {
                                       return $item.find('video').prop('outerHTML');
-                                  } else {
-                                      // $item.hasClass('pic')
-                                      $item.find('img').attr('src', $item.find('img').attr('data-src'));
-                                      $item.find('img').removeAttr('data-src');
-                                      return $item.html() || '';
                                   }
+                                  // $item.hasClass('pic')
+                                  $item.find('img').attr('src', $item.find('img').attr('data-src'));
+                                  $item.find('img').removeAttr('data-src');
+                                  return $item.html() || '';
                               })
                               .join('')
-                        : $('.view .video').html() || '';
+                        : $('.view video').prop('outerHTML') || '';
 
                     item.description = `${media}<br>${item.description}`;
                 }

@@ -55,16 +55,16 @@ const DATE_REGEX = /(\d{4}-\d{2}-\d{2} \d{2}:\d{2})/;
 async function handler(ctx) {
     const group = ctx.req.param('group');
     const artifact = ctx.req.param('artifact');
-    const limit = ctx.req.query('limit') ? Number.parseInt(ctx.req.query('limit'), 10) : 15;
+    const limit = ctx.req.query('limit') ? Number(ctx.req.query('limit')) : 15;
 
     // (org.springframework, spring-core) -> org/springframework/spring-core
     const identifier = `${group.replaceAll('.', '/')}/${artifact}`;
 
     try {
         const metadataUrl = `https://repo1.maven.org/maven2/${identifier}/maven-metadata.xml`;
-        const metaDataResponse = await ofetch(metadataUrl);
+        const metadataResponse = await ofetch(metadataUrl);
 
-        const $meta = load(metaDataResponse, { xmlMode: true });
+        const $meta = load(metadataResponse, { xmlMode: true });
         const latestVersion = $meta('metadata > versioning > latest').text();
 
         if (!latestVersion) {
@@ -91,7 +91,8 @@ async function handler(ctx) {
             const version = href.replace('/', '');
             const versionUrl = `https://central.sonatype.com/artifact/${group}/${artifact}/${version}`;
 
-            const rawText = element.nextSibling ? (element.nextSibling as any).nodeValue : '';
+            const sibling = element.nextSibling;
+            const rawText = sibling?.type === 'text' ? sibling.data : '';
 
             // Date format: 2024-09-22 04:19
             const match = rawText.match(DATE_REGEX);
