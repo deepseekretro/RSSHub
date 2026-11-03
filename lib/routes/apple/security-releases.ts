@@ -9,6 +9,7 @@ import { ViewType } from '@/types';
 import cache from '@/utils/cache';
 import ofetch from '@/utils/ofetch';
 import { parseDate } from '@/utils/parse-date';
+import { getRouteLimit } from '@/utils/route-limit';
 import { isValidHost } from '@/utils/valid-host';
 
 import { renderDescription } from './templates/security-releases';
@@ -20,7 +21,7 @@ export const handler = async (ctx: Context): Promise<Data> => {
     }
 
     const language = languageParam as Language;
-    const limit = Number(ctx.req.query('limit') ?? '30');
+    const limit = getRouteLimit(ctx, 30);
 
     const baseUrl = 'https://support.apple.com';
     const targetUrl: string = new URL(`${languageParam}/100100`, baseUrl).href;
@@ -35,7 +36,7 @@ export const handler = async (ctx: Context): Promise<Data> => {
         .map((el) => $(el).text());
 
     let items: DataItem[] = $trEls
-        .slice(1, limit)
+        .slice(1, limit + 1)
         .toArray()
         .map((el) => {
             const $el: Cheerio<Element> = $(el);
@@ -57,15 +58,17 @@ export const handler = async (ctx: Context): Promise<Data> => {
             const processedItem: DataItem = {
                 title,
                 description,
-                pubDate: pubDateStr ? parseDate(pubDateStr, ['DD MMM YYYY', 'YYYY 年 MM 月 DD 日']) : undefined,
+                pubDate: pubDateStr ? parseDate(pubDateStr, ['DD MMM YYYY', 'YYYY 年 M 月 D 日']) : undefined,
                 link: linkUrl ? new URL(linkUrl, baseUrl).href : undefined,
                 author: authors,
                 content: {
                     html: description,
                     text: description,
                 },
-                updated: upDatedStr ? parseDate(upDatedStr, ['DD MMM YYYY', 'YYYY 年 MM 月 DD 日']) : undefined,
+                updated: upDatedStr ? parseDate(upDatedStr, ['DD MMM YYYY', 'YYYY 年 M 月 D 日']) : undefined,
                 language,
+                // Releases without a detail page can share a name, such as two watchOS 27.0.1 rows on different days
+                guid: linkUrl ? undefined : `${title} ${pubDateStr.trim()}`,
             };
 
             return processedItem;
@@ -74,7 +77,10 @@ export const handler = async (ctx: Context): Promise<Data> => {
     items = await Promise.all(
         items.map((item) => {
             if (!item.link) {
-                return item;
+                return {
+                    ...item,
+                    link: `${targetUrl}#:~:text=${encodeURIComponent(item.title)}`,
+                };
             }
 
             return cache.tryGet(item.link, async (): Promise<DataItem> => {
@@ -97,7 +103,7 @@ export const handler = async (ctx: Context): Promise<Data> => {
                 const processedItem: DataItem = {
                     title,
                     description,
-                    pubDate: pubDateStr ? parseDate(pubDateStr, 'MMDDYYYY') : item.pubDate,
+                    pubDate: item.pubDate ?? (pubDateStr ? parseDate(pubDateStr, 'MMDDYYYY') : undefined),
                     author: authors,
                     content: {
                         html: description,
