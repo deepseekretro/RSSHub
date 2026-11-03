@@ -1,5 +1,5 @@
-import type { Browser, BrowserContext, BrowserContextOptions, LaunchOptions, Page } from 'playwright';
-import { chromium } from 'playwright';
+import type { Browser, BrowserContext, BrowserContextOptions, LaunchOptions, Page } from 'patchright';
+import { chromium } from 'patchright';
 
 import { config } from '@/config';
 
@@ -213,4 +213,4 @@ export const getPlaywrightPage = async (
     }
 };
 
-export { type Page } from 'playwright';
+export { type Page } from 'patchright';
